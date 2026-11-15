@@ -21,11 +21,17 @@ def main():
         p.add_argument("--" + name, required=True)
     for name in ("cards", "wall-minutes", "cpus-per-task", "memory-mib", "probe-timeout-seconds"):
         p.add_argument("--" + name, type=int, required=True)
+    p.add_argument("--startup-minutes", type=int, default=4,
+                   help="include module load, cold startup and hardware probes (default: 4)")
     p.add_argument("--setup-file", type=Path)
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
-    if args.cards not in (1, 2, 4) or args.wall_minutes < 6 or not 0 < args.probe_timeout_seconds < 180:
-        p.error("the demo requires 1, 2 or 4 cards, at least 6 wall minutes and 1–179 probe seconds")
+    if args.cards not in (1, 2, 4):
+        p.error("the demo requires 1, 2 or 4 cards")
+    if not 0 < args.startup_minutes <= min(args.wall_minutes, 15) - 2:
+        p.error("leave at least two minutes after startup within the partition limit and 15-minute demo cap")
+    if not 0 < args.probe_timeout_seconds < args.startup_minutes * 60:
+        p.error("the probe timeout must be positive and shorter than the startup budget")
     if args.cpus_per_task < args.cards or args.memory_mib <= 0:
         p.error("provide at least one CPU core per card and positive memory")
     adapter = Path(__file__).resolve().with_name("train_demo.py")
@@ -52,7 +58,7 @@ def main():
         "schema_version": 1, "framework": "custom", "purpose": "smoke", "supports_resume": False,
         "total_steps": 2, "evidence": [], "workload_manifest": "workload.json", "workload_sha256": sha(args.output / "workload.json"),
         "candidates": [dict(route, id="demo", wall_minutes=args.wall_minutes, queue_minutes=0, setup_minutes=0,
-                            startup_minutes=4, seconds_per_step=1, checkpoint_margin_minutes=1)],
+                            startup_minutes=args.startup_minutes, seconds_per_step=1, checkpoint_margin_minutes=1)],
     })
     print(args.output / "spec.json")
 

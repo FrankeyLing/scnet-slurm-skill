@@ -6,6 +6,8 @@
 
 昆山的历史候选是 `kshdAI`（两小时）和 `kshdtest`（三天）；哈尔滨历史上曾在 `hebhdnormal` 分到单张海光卡。名字、分区时限、节点数、软件模块和账单权限都要现场确认。软件模块可以用 `module avail` / `module show` 检查，选择该中心维护的海光兼容 PyTorch；使用模块时把具体版本与激活命令放进经核对的 `setup_file`。保留调度器提供的设备可见性，不要把主机卡编号写成全局可见列表。先测项目真正用的算子，再决定精度、混合精度和第三方扩展。
 
+在登录节点用 Python 3.7 或更高版本调用提交工具。裸登录环境的解释器有时低于要求或根本没有 `python3`。可用单独的解释器调用提交工具，让 `setup_file` 在非交互 Bash 中初始化作业环境。有些站点的模块可以在提交与作业中用同一套环境，也要先验证重复加载是否正常。生成的作业会继承提交环境。如果模块系统报 `Cannot initialize TCL`，先从未加载训练模块的提交环境复现和预检，避免把已有的运行时库路径传到再次初始化模块的作业中。
+
 ## 2. 填计划与工作负载文件
 
 两个文件均用 UTF-8（八位统一码转换格式，8-bit Unicode Transformation Format，保留中文且不在脚本开头插入标记的编码），禁止重复键。使用 `sha256sum` 或 PowerShell `Get-FileHash -Algorithm SHA256` 计算文件摘要；摘要填小写。先编辑 `workload.json`，最后计算摘要，任一内容变化都重新计算并匹配对应验收。示例生成器见仓库 `examples/make_demo.py`。
@@ -42,5 +44,7 @@ python3 work/bundle/scnet.py status JOB_ID
 通过后使用回执中的作业号。在一个新目录中，`submit ... --chain --execute` 会按成功依赖预先提交所有分段。普通 `--segment 2` 只有等前段账本完成、凭据与检查点一致后才放行。链路任何一段非零退出时，成功依赖会拦住后继；仍需查看 `status` 核对现场状态。运行器在每一段真正开始训练前重新检查检查点。监控耗时、退出码、真实进度、卡数和显存，主机内存超限与显存超限分别排查。不要根据台账里 `billing` 的数值推算金额。
 
 如果到达时限、运行异常或成功凭据缺失，不把该段标记为完成。找最后一份已验证的完整检查点。要从计划外的检查点续跑，创建新计划，指定 `resume_existing: true`、实际 `start_step` 和 `initial_checkpoint: {"path": "/absolute/checkpoint.pt", "sha256": "..."}`；保持原 `total_steps`、同一个工作负载及适用验收。适配器必须检查恢复后的真实进度。提交调用结果不明时，`submissions/` 的 `intent` 是防重记录；先在平台按时段和作业名辨明是否已提交，再决定下一步。不要手动清空意图记录并盲重试。
+
+短测通过要求 `sacct` 的父作业最终为 `COMPLETED 0:0`，且探针、训练凭据均匹配该作业号和预期进度。实测中有一次训练已写出凭据，调度器仍因主机内存超限将作业判为 `OUT_OF_MEMORY`。以两项检查共同判定。初始化软件栈和运行时探针也要预留主机内存。若 `sbatch --test-only` 拒绝内存与核心的比例，按目标队列现场规则调整申请，再运行预检。
 
 调度器参数语义参见 [Slurm sbatch](https://slurm.schedmd.com/sbatch.html)；站点拓扑查询参见 [超算互联网计算服务文档](https://www.scnet.cn/doc/1.0.6/30000/general-handbook/sys-info-new.html)。

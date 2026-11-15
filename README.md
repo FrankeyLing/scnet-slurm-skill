@@ -17,24 +17,28 @@ cp -R skill/scnet-slurm ~/.codex/skills/
 
 ## 命令行
 
-在候选集群的 Linux 登录节点执行 `inspect`，按现场结果填写队列和运行环境。以下演示使用合成数据。请替换 `CLUSTER`、`PARTITION` 和运行环境，并按实机规格设置时限、核数与内存。若需要加载模块，用 `--setup-file` 指向包含加载命令的文件。
+在候选集群的 Linux 登录节点执行 `inspect`，按现场结果填写队列和运行环境。以下昆山演示使用合成数据。请替换 `CLUSTER`、`PARTITION`，按实机规格设置时限、核数与主机内存。检查调用提交工具的 Python 至少是 3.7。作业通过 `--setup-file` 初始化自己的运行环境。哈尔滨的环境与内存配置见 [实机记录](docs/live-smoke.md)。
 
 ```bash
 CLUSTER=example-cluster
 PARTITION=example-partition
-python3 skill/scnet-slurm/scripts/scnet.py inspect --partition "$PARTITION"
-python3 examples/make_demo.py --center Kunshan --cluster "$CLUSTER" --partition "$PARTITION" \
-  --python python3 --runtime-id example-vendor-module --cards 1 --wall-minutes 120 \
-  --cpus-per-task 4 --memory-mib 4096 --probe-timeout-seconds 90 --output demo
-python3 skill/scnet-slurm/scripts/scnet.py decide demo/spec.json
-python3 skill/scnet-slurm/scripts/scnet.py render demo/spec.json demo/bundle
-python3 skill/scnet-slurm/scripts/scnet.py preflight demo/bundle
-python3 skill/scnet-slurm/scripts/scnet.py submit demo/bundle --segment 1 --execute
+SETUP_SCRIPT=/absolute/path/to/site-setup.sh
+source "$SETUP_SCRIPT"
+python --version
+python skill/scnet-slurm/scripts/scnet.py inspect --partition "$PARTITION"
+python examples/make_demo.py --center Kunshan --cluster "$CLUSTER" --partition "$PARTITION" \
+  --python python --runtime-id example-vendor-module --cards 1 --wall-minutes 120 \
+  --cpus-per-task 4 --memory-mib 12288 --startup-minutes 4 --probe-timeout-seconds 150 \
+  --setup-file "$SETUP_SCRIPT" --output demo
+python skill/scnet-slurm/scripts/scnet.py decide demo/spec.json
+python skill/scnet-slurm/scripts/scnet.py render demo/spec.json demo/bundle
+python skill/scnet-slurm/scripts/scnet.py preflight demo/bundle
+python skill/scnet-slurm/scripts/scnet.py submit demo/bundle --segment 1 --execute
 ```
 
 规划和生成只依赖 Python 3.7 或更高版本的标准库，可以离线运行。演示配置使用生成时的 Linux 路径，从预检开始也应在所选集群的登录节点操作。确认首段和续训的短跑通过后，可通过 `--chain` 提交按成功状态衔接的整条链。用 `status <作业号>` 查询调度状态，再检查输出、错误日志和本次训练生成的凭据。[配置、提交和排障](skill/scnet-slurm/references/submit.md)
 
-运行 `python3 -m unittest discover -s tests -v` 可复核资源决策、断点衔接、产物凭据和提交行为。本版通过了本地测试与模拟调度器验证，尚待在目标队列运行示例短测。
+运行 `python -m unittest discover -s tests -v` 可复核资源决策、断点衔接、产物凭据和提交行为。两地的合成短测记录包含调度状态、计算节点探针、训练凭据和主机内存排障。[实机验证记录](docs/live-smoke.md)
 
 ## 资源与框架选择
 
