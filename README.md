@@ -40,6 +40,11 @@ python skill/scnet-slurm/scripts/scnet.py submit demo/bundle --segment 1 --execu
 
 运行 `python -m unittest discover -s tests -v` 可复核资源决策、断点衔接、产物凭据和提交行为。两地的合成短测记录包含调度状态、计算节点探针、训练凭据和主机内存排障。[实机验证记录](docs/live-smoke.md)
 
+调度器响应较慢时，可在 `inspect`、`preflight`、`submit`、`status` 中明确指定
+`--scheduler-timeout-seconds 120`。它控制每条调度命令的等待时间，范围为 1 至
+600 秒，原默认值仍为 30 秒。程序照常完成真实预检和提交意图登记，不自动重试；
+包装器的整个阶段预算需另行设置。[等待时限与升级方法](skill/scnet-slurm/references/submit.md)
+
 ## 资源与框架选择
 
 挑选昆山和哈尔滨的候选队列时，先核实当前账号的可用性、计费方式、卡型、软件环境及墙钟时限，再用同一份数据、权重与参数做短跑。将冷启动、保存、验证、排队及跨中心传输都算进预计交付时间。小探针和易复现的短对照适合快速队列。无法安全切分的任务，或者分段排队与启动开销更高的任务，才值得优先考虑长队列。

@@ -20,6 +20,7 @@ SHA = re.compile(r"[a-f0-9]{64}\Z")
 JOBID = re.compile(r"[1-9][0-9]*\Z")
 ROUTE = ("center", "cluster", "partition", "cards")
 MAX_LOG = 8192
+DEFAULT_SCHEDULER_TIMEOUT_SECONDS = 30
 
 
 def require(condition, message):
@@ -283,18 +284,29 @@ def runner(argv, timeout=30, check=True):
     return {"stdout": obj.stdout, "stderr": obj.stderr, "returncode": obj.returncode}
 
 
-def live_cluster():
-    match = re.search(r"^ClusterName\s*=\s*(\S+)", runner(["scontrol", "show", "config"])["stdout"], re.MULTILINE)
+def scheduler_timeout(value):
+    require(type(value) is int and 1 <= value <= 600,
+            "scheduler timeout must be an integer between 1 and 600 seconds")
+    return value
+
+
+def live_cluster(scheduler_timeout_seconds=DEFAULT_SCHEDULER_TIMEOUT_SECONDS):
+    wait = scheduler_timeout(scheduler_timeout_seconds)
+    match = re.search(r"^ClusterName\s*=\s*(\S+)",
+                      runner(["scontrol", "show", "config"], timeout=wait)["stdout"], re.MULTILINE)
     require(match, "Slurm ClusterName missing")
     return match.group(1)
 
 
-def inspect_cluster(partition):
+def inspect_cluster(partition, scheduler_timeout_seconds=DEFAULT_SCHEDULER_TIMEOUT_SECONDS):
+    wait = scheduler_timeout(scheduler_timeout_seconds)
     require(NAME.fullmatch(partition), "invalid partition")
-    return {"cluster": live_cluster(), "partition": runner(["scontrol", "-o", "show", "partition", partition])["stdout"],
-            "nodes": runner(["sinfo", "-e", "-h", "-p", partition, "-o", "%R|%l|%G|%c|%m|%t|%D"])["stdout"],
-            "queue": runner(["squeue", "-h", "-p", partition, "-o", "%i|%T|%D|%l|%R"], check=False),
-            "fairshare": runner(["sshare", "-U"], check=False)}
+    return {"cluster": live_cluster(wait),
+            "partition": runner(["scontrol", "-o", "show", "partition", partition], timeout=wait)["stdout"],
+            "nodes": runner(["sinfo", "-e", "-h", "-p", partition, "-o", "%R|%l|%G|%c|%m|%t|%D"], timeout=wait)["stdout"],
+            "queue": runner(["squeue", "-h", "-p", partition, "-o", "%i|%T|%D|%l|%R"], timeout=wait, check=False),
+            "fairshare": runner(["sshare", "-U"], timeout=wait, check=False),
+            "scheduler_timeout_seconds": wait}
 
 
 def wall_seconds(value):
@@ -348,16 +360,17 @@ def verify_files(bundle, index):
         checked_file(manifest["initial_checkpoint"]["path"], manifest["initial_checkpoint"]["sha256"])
 
 
-def preflight(bundle, indices):
+def preflight(bundle, indices, scheduler_timeout_seconds=DEFAULT_SCHEDULER_TIMEOUT_SECONDS):
+    wait = scheduler_timeout(scheduler_timeout_seconds)
     manifest, route, job = staged(bundle)
     require(os.name == "posix", "run on the Linux login node for the chosen route")
-    require(live_cluster() == route["cluster"], "connected Slurm ClusterName does not match the selected route")
+    require(live_cluster(wait) == route["cluster"], "connected Slurm ClusterName does not match the selected route")
     partition = route["partition"]
-    raw = runner(["scontrol", "-o", "show", "partition", partition])["stdout"]
+    raw = runner(["scontrol", "-o", "show", "partition", partition], timeout=wait)["stdout"]
     info = dict(re.findall(r"(\w+)=(\S+)", raw))
     require(info.get("PartitionName") == partition and info.get("State") == "UP", "partition is missing or not UP")
     limit = wall_seconds(info.get("MaxTime", ""))
-    rows = runner(["sinfo", "-e", "-h", "-p", partition, "-o", "%R|%l|%G|%c|%m|%t|%D"])["stdout"]
+    rows = runner(["sinfo", "-e", "-h", "-p", partition, "-o", "%R|%l|%G|%c|%m|%t|%D"], timeout=wait)["stdout"]
     require(compatible_node(rows, route, job["launch"]), "no matching one-node GRES/CPU/memory shape in this partition")
     verify_files(bundle, 1)
     reports = []
@@ -365,23 +378,24 @@ def preflight(bundle, indices):
         require(1 <= idx <= len(manifest["scripts"]), "invalid segment index")
         require(route["requested_minutes"][idx - 1] * 60 <= limit, "request exceeds live partition MaxTime")
         script = bundle / manifest["scripts"][idx - 1]
-        runner(["bash", "-n", str(script)])
-        report = runner(["sbatch", "--test-only", "--chdir=" + str(bundle), str(script)])
-        reports.append({"segment": idx, "scheduler": report})
+        runner(["bash", "-n", str(script)], timeout=30)
+        report = runner(["sbatch", "--test-only", "--chdir=" + str(bundle), str(script)], timeout=wait)
+        reports.append({"segment": idx, "scheduler": report, "scheduler_timeout_seconds": wait})
     return manifest, reports
 
 
-def submit(bundle, index, chain):
+def submit(bundle, index, chain, scheduler_timeout_seconds=DEFAULT_SCHEDULER_TIMEOUT_SECONDS):
+    wait = scheduler_timeout(scheduler_timeout_seconds)
     manifest, route, _ = staged(bundle)
     indices = list(range(1, len(manifest["scripts"]) + 1)) if chain else [index]
-    preflight(bundle, indices)
+    preflight(bundle, indices, wait)
     if chain:
         require(not any((bundle / "submissions").iterdir()), "chain requires a fresh bundle; reconcile prior submission records")
     previous = None
     if not chain and index > 1:
         prev = load(bundle / "submissions" / "{:03d}.json".format(index - 1))
         require(prev.get("state") == "submitted" and JOBID.fullmatch(prev["job_id"]), "previous segment has no confirmed job ID")
-        raw = runner(["sacct", "-n", "-X", "-P", "-j", prev["job_id"], "-o", "JobIDRaw,State,ExitCode"])["stdout"]
+        raw = runner(["sacct", "-n", "-X", "-P", "-j", prev["job_id"], "-o", "JobIDRaw,State,ExitCode"], timeout=wait)["stdout"]
         require(any(row.rstrip("|").split("|") == [prev["job_id"], "COMPLETED", "0:0"] for row in raw.splitlines()),
                 "previous segment not confirmed completed; inspect accounting and runtime receipt")
         from runtime import RuntimeFailure, verify_previous
@@ -400,16 +414,26 @@ def submit(bundle, index, chain):
             argv.extend(["--dependency=afterok:" + previous, "--kill-on-invalid-dep=yes"])
         argv.append(str(bundle / manifest["scripts"][idx - 1]))
         # Persist intent before the network mutation. If no ID returns, never automatically retry.
-        dump(receipt, {"state": "intent", "segment": idx, "argv": argv}, "x")
-        response = runner(argv)
+        dump(receipt, {"state": "intent", "segment": idx, "argv": argv, "scheduler_timeout_seconds": wait}, "x")
+        response = runner(argv, timeout=wait)
         parts = response["stdout"].strip().split(";")
         require(len(parts) in (1, 2) and JOBID.fullmatch(parts[0]) and (len(parts) == 1 or parts[1] == route["cluster"]),
                 "ambiguous sbatch response; reconcile in squeue/sacct before retrying")
         previous = parts[0]
-        result = {"state": "submitted", "segment": idx, "job_id": previous, "cluster": route["cluster"], "argv": argv}
+        result = {"state": "submitted", "segment": idx, "job_id": previous, "cluster": route["cluster"],
+                  "argv": argv, "scheduler_timeout_seconds": wait}
         replace_json(receipt, result)
         records.append(result)
     return records
+
+
+def status(job_id, scheduler_timeout_seconds=DEFAULT_SCHEDULER_TIMEOUT_SECONDS):
+    wait = scheduler_timeout(scheduler_timeout_seconds)
+    require(JOBID.fullmatch(job_id), "expected a numeric job id")
+    return {"cluster": live_cluster(wait), "scheduler_timeout_seconds": wait,
+            "queue": runner(["squeue", "-j", job_id], timeout=wait, check=False),
+            "accounting": runner(["sacct", "-j", job_id, "-P", "-o",
+                                  "JobID,State,ExitCode,Elapsed,AllocTRES,Partition"], timeout=wait, check=False)}
 
 
 def main():
@@ -425,6 +449,10 @@ def main():
     p.add_argument("--execute", action="store_true", required=True)
     p = sub.add_parser("status"); p.add_argument("job_id")
     p = sub.add_parser("_verify-files"); p.add_argument("manifest", type=Path); p.add_argument("segment", type=int)
+    for command in ("inspect", "preflight", "submit", "status"):
+        sub.choices[command].add_argument("--scheduler-timeout-seconds", type=int,
+            default=DEFAULT_SCHEDULER_TIMEOUT_SECONDS,
+            help="wait 1..600 seconds per scheduler command; default 30; never retries")
     args = parser.parse_args()
     result = None
     try:
@@ -433,18 +461,16 @@ def main():
         elif args.command == "render":
             result = render(args.spec, args.bundle.resolve())
         elif args.command == "inspect":
-            result = inspect_cluster(args.partition)
+            result = inspect_cluster(args.partition, args.scheduler_timeout_seconds)
         elif args.command == "preflight":
             bundle = args.bundle.resolve()
-            result = preflight(bundle, range(1, len(staged(bundle)[0]["scripts"]) + 1))[1]
+            scheduler_timeout(args.scheduler_timeout_seconds)
+            result = preflight(bundle, range(1, len(staged(bundle)[0]["scripts"]) + 1),
+                               args.scheduler_timeout_seconds)[1]
         elif args.command == "submit":
-            result = submit(args.bundle.resolve(), args.segment, args.chain)
+            result = submit(args.bundle.resolve(), args.segment, args.chain, args.scheduler_timeout_seconds)
         elif args.command == "status":
-            require(JOBID.fullmatch(args.job_id), "expected a numeric job id")
-            current = live_cluster()
-            result = {"cluster": current, "queue": runner(["squeue", "-j", args.job_id], check=False),
-                      "accounting": runner(["sacct", "-j", args.job_id, "-P", "-o",
-                                            "JobID,State,ExitCode,Elapsed,AllocTRES,Partition"], check=False)}
+            result = status(args.job_id, args.scheduler_timeout_seconds)
         elif args.command == "_verify-files":
             verify_files(args.manifest.parent, args.segment)
     except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:

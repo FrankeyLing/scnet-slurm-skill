@@ -41,6 +41,24 @@ python3 work/bundle/scnet.py status JOB_ID
 
 前两步可本地执行。上传的是整个新 `bundle` 目录，至少保留 `logs/`、`artifacts/`、`submissions/` 三个空目录，并在计算节点可见的共享文件系统上使用。代码、数据和训练环境独立部署。后面三步在对应中心的登录节点执行。预检校验集群名、分区 `MaxTime`、每节点形状、训练文件摘要和脚本的 Bash 语法，使用 `sbatch --test-only` 核对当前申请。预检不会提交作业，不能保证后续启动时间和节点状态。如果站点拒绝 `--test-only`，停止并向站点核实，不把实际提交当预检用。
 
+`inspect`、`preflight`、`submit`、`status` 可显式传入 `--scheduler-timeout-seconds 120`。
+这是每一条调度命令的等待上限，须为 1 至 600 秒的整数；未传时保留原来的 30 秒。
+集群、分区、资源、队列、份额、父作业核对和真正的提交都使用该值；本地 Bash
+语法检查仍限 30 秒。预检与提交登记会记录实际选择的等待上限。它不会重试命令。
+
+```bash
+python3 work/bundle/scnet.py preflight work/bundle --scheduler-timeout-seconds 120
+python3 work/bundle/scnet.py submit work/bundle --segment 1 --execute --scheduler-timeout-seconds 120
+python3 work/bundle/scnet.py status JOB_ID --scheduler-timeout-seconds 120
+```
+
+自动化包装器应另设整个阶段的总等待预算。一次 `inspect` 顺序执行五条调度命令，
+一次 `preflight` 执行三条查询，再为每段执行一次 `sbatch --test-only`；文件摘要核验
+还需要额外时间。单条设为 120 秒时，不能仍用 120 秒作为整个阶段的总限时。
+延长等待不能保证站点及时响应；超时后先对账。真正的 `sbatch` 超时仍保留提交意图，
+禁止据此自动重交。升级后用新版本重新生成新的 bundle，保留旧版本及失败现场，
+不要改写已有 bundle 中受摘要保护的工具脚本。
+
 通过后使用回执中的作业号。在一个新目录中，`submit ... --chain --execute` 会按成功依赖预先提交所有分段。普通 `--segment 2` 只有等前段账本完成、凭据与检查点一致后才放行。链路任何一段非零退出时，成功依赖会拦住后继；仍需查看 `status` 核对现场状态。运行器在每一段真正开始训练前重新检查检查点。监控耗时、退出码、真实进度、卡数和显存，主机内存超限与显存超限分别排查。不要根据台账里 `billing` 的数值推算金额。
 
 如果到达时限、运行异常或成功凭据缺失，不把该段标记为完成。找最后一份已验证的完整检查点。要从计划外的检查点续跑，创建新计划，指定 `resume_existing: true`、实际 `start_step` 和 `initial_checkpoint: {"path": "/absolute/checkpoint.pt", "sha256": "..."}`；保持原 `total_steps`、同一个工作负载及适用验收。适配器必须检查恢复后的真实进度。提交调用结果不明时，`submissions/` 的 `intent` 是防重记录；先在平台按时段和作业名辨明是否已提交，再决定下一步。不要手动清空意图记录并盲重试。
